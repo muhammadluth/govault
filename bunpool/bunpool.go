@@ -3,7 +3,9 @@ package bunpool
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/muhammadluth/govault"
 	"github.com/uptrace/bun"
@@ -94,6 +96,64 @@ func (q *SelectQuery) Model(model interface{}) *SelectQuery {
 	return q
 }
 
+// WherePK sets the where primary key for select
+func (q *SelectQuery) WherePK(cols ...string) *SelectQuery {
+	q.SelectQuery.WherePK(cols...)
+	return q
+}
+
+func (q *SelectQuery) Where(query string, args ...any) *SelectQuery {
+	q.SelectQuery.Where(query, args...)
+	return q
+}
+
+func (q *SelectQuery) WhereOr(query string, args ...any) *SelectQuery {
+	q.SelectQuery.WhereOr(query, args...)
+	return q
+}
+
+func (q *SelectQuery) WhereGroup(sep string, fn func(*SelectQuery) *SelectQuery) *SelectQuery {
+	q.SelectQuery.WhereGroup(sep, func(sq *bun.SelectQuery) *bun.SelectQuery {
+		return fn(q).SelectQuery
+	})
+	return q
+}
+
+func (q *SelectQuery) WhereDeleted() *SelectQuery {
+	q.SelectQuery.WhereDeleted()
+	return q
+}
+
+func (q *SelectQuery) WhereAllWithDeleted() *SelectQuery {
+	q.SelectQuery.WhereAllWithDeleted()
+	return q
+}
+
+func (q *SelectQuery) Order(orders ...string) *SelectQuery {
+	q.SelectQuery.Order(orders...)
+	return q
+}
+
+func (q *SelectQuery) OrderBy(colName string, sortDir bun.Order) *SelectQuery {
+	q.SelectQuery.OrderBy(colName, sortDir)
+	return q
+}
+
+func (q *SelectQuery) OrderExpr(query string, args ...any) *SelectQuery {
+	q.SelectQuery.OrderExpr(query, args...)
+	return q
+}
+
+func (q *SelectQuery) Limit(n int) *SelectQuery {
+	q.SelectQuery.Limit(n)
+	return q
+}
+
+func (q *SelectQuery) Offset(n int) *SelectQuery {
+	q.SelectQuery.Offset(n)
+	return q
+}
+
 // Scan executes the query and decrypts results
 func (q *SelectQuery) Scan(ctx context.Context, dest ...interface{}) error {
 	err := q.SelectQuery.Scan(ctx, dest...)
@@ -101,10 +161,51 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...interface{}) error {
 		return err
 	}
 
+	// Decrypt all destination values
 	for _, d := range dest {
-		if err := decryptModel(q.encryptor, d); err != nil {
+		if err := decryptValue(q.encryptor, d); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// decryptValue handles decryption for various types (single model, slice, etc)
+func decryptValue(encryptor *govault.Encryptor, value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	val := reflect.ValueOf(value)
+	if val.Kind() != reflect.Ptr {
+		return nil
+	}
+
+	val = val.Elem()
+
+	// Handle slice
+	if val.Kind() == reflect.Slice {
+		for i := 0; i < val.Len(); i++ {
+			elem := val.Index(i)
+			if elem.Kind() == reflect.Ptr {
+				if err := decryptModel(encryptor, elem.Interface()); err != nil {
+					return err
+				}
+			} else if elem.Kind() == reflect.Struct {
+				if elem.CanAddr() {
+					if err := decryptModel(encryptor, elem.Addr().Interface()); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	// Handle single struct
+	if val.Kind() == reflect.Struct {
+		return decryptModel(encryptor, value)
 	}
 
 	return nil
@@ -160,6 +261,10 @@ func encryptModel(encryptor *govault.Encryptor, model interface{}) error {
 
 // decryptModel decrypts fields tagged with encrypted:"true"
 func decryptModel(encryptor *govault.Encryptor, model interface{}) error {
+	if model == nil {
+		return nil
+	}
+
 	val := reflect.ValueOf(model)
 	if val.Kind() == reflect.Ptr {
 		val = val.Elem()
@@ -174,13 +279,19 @@ func decryptModel(encryptor *govault.Encryptor, model interface{}) error {
 		field := val.Field(i)
 		fieldType := typ.Field(i)
 
+		// Skip if not exported
+		if !field.CanSet() {
+			continue
+		}
+
 		if fieldType.Tag.Get("encrypted") == "true" {
-			if field.Kind() == reflect.String && field.CanSet() {
+			if field.Kind() == reflect.String {
 				ciphertext := field.String()
-				if ciphertext != "" {
+				if ciphertext != "" && strings.Contains(ciphertext, "|") {
+
 					decrypted, err := encryptor.Decrypt(ciphertext)
 					if err != nil {
-						return err
+						return fmt.Errorf("failed to decrypt field %s: %w", fieldType.Name, err)
 					}
 					field.SetString(decrypted)
 				}
