@@ -108,14 +108,148 @@ func (db *BunDB) NewTruncateTable() *bun.TruncateTableQuery {
 	return db.DB.NewTruncateTable()
 }
 
-// NewRaw creates a new raw query
-func (db *BunDB) NewRaw(query string, args ...interface{}) *bun.RawQuery {
-	return db.DB.NewRaw(query, args...)
+// NewRaw creates a new raw query with encryption/decryption support
+func (db *BunDB) NewRaw(query string, args ...interface{}) *BunRawQuery {
+	return &BunRawQuery{
+		RawQuery: db.DB.NewRaw(query, args...),
+		govault:  db.govault,
+		keyID:    db.keyID,
+	}
 }
 
 // NewValues creates a new values query
 func (db *BunDB) NewValues(model interface{}) *bun.ValuesQuery {
 	return db.DB.NewValues(model)
+}
+
+// BunRawQuery wraps bun.RawQuery with encryption/decryption support
+type BunRawQuery struct {
+	*bun.RawQuery
+	govault *DB
+	keyID   string
+}
+
+// WithKey sets the encryption key for this raw query
+func (q *BunRawQuery) WithKey(keyID string) *BunRawQuery {
+	q.keyID = keyID
+	return q
+}
+
+// EncryptValue encrypts a single value for use in raw SQL
+// Returns encrypted string in format: keyID|nonce|ciphertext
+func (q *BunRawQuery) EncryptValue(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+
+	if q.keyID != "" {
+		return q.govault.Encrypt(plaintext, q.keyID)
+	}
+	return q.govault.Encrypt(plaintext)
+}
+
+// Exec executes the raw query
+func (q *BunRawQuery) Exec(ctx context.Context, dest ...interface{}) (sql.Result, error) {
+	return q.RawQuery.Exec(ctx, dest...)
+}
+
+// Scan executes the raw query and scans results
+// If dest is a struct with encrypted fields, they will be decrypted
+func (q *BunRawQuery) Scan(ctx context.Context, dest ...interface{}) error {
+	err := q.RawQuery.Scan(ctx, dest...)
+	if err != nil {
+		return err
+	}
+
+	// Attempt to decrypt if dest contains encrypted fields
+	for _, d := range dest {
+		if err := q.decryptScanResult(d); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// decryptScanResult attempts to decrypt encrypted fields in the scanned result
+func (q *BunRawQuery) decryptScanResult(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	val := reflect.ValueOf(value)
+	if val.Kind() != reflect.Ptr {
+		return nil
+	}
+
+	val = val.Elem()
+
+	// Handle slice
+	if val.Kind() == reflect.Slice {
+		for i := 0; i < val.Len(); i++ {
+			elem := val.Index(i)
+			if elem.Kind() == reflect.Ptr {
+				if err := q.decryptStruct(elem.Interface()); err != nil {
+					return err
+				}
+			} else if elem.Kind() == reflect.Struct {
+				if elem.CanAddr() {
+					if err := q.decryptStruct(elem.Addr().Interface()); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	// Handle single struct
+	if val.Kind() == reflect.Struct {
+		return q.decryptStruct(value)
+	}
+
+	return nil
+}
+
+// decryptStruct decrypts fields tagged with encrypted:"true"
+func (q *BunRawQuery) decryptStruct(model interface{}) error {
+	if model == nil {
+		return nil
+	}
+
+	val := reflect.ValueOf(model)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return nil
+	}
+
+	typ := val.Type()
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		fieldType := typ.Field(i)
+
+		if !field.CanSet() {
+			continue
+		}
+
+		if fieldType.Tag.Get("encrypted") == "true" {
+			if field.Kind() == reflect.String {
+				ciphertext := field.String()
+				if ciphertext != "" && strings.Contains(ciphertext, "|") {
+					decrypted, err := q.govault.Decrypt(ciphertext)
+					if err != nil {
+						return fmt.Errorf("failed to decrypt field %s: %w", fieldType.Name, err)
+					}
+					field.SetString(decrypted)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // BunInsertQuery wraps bun.InsertQuery

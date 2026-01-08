@@ -3,7 +3,6 @@ package govault_test
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -142,8 +141,6 @@ func TestBunSelect(t *testing.T) {
 			Model(&retrieved).
 			Where("id = ?", user.ID).
 			Scan(ctx, &retrieved)
-
-		fmt.Println("retrieved", retrieved)
 
 		require.NoError(t, err)
 		assert.Equal(t, user.Name, retrieved.Name)
@@ -883,4 +880,769 @@ func TestGetDefaultKeyID(t *testing.T) {
 	// Test GetDefaultKeyID returns the default key ID
 	defaultID := db.GetDefaultKeyID()
 	assert.Equal(t, "3", defaultID)
+}
+
+func TestBunSelectAdvancedMethods(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Insert test data
+	users := []*TestUser{
+		{Name: "AdvAlice", Email: "advalice@example.com", Phone: "+62811111119", Address: "Jakarta"},
+		{Name: "AdvBob", Email: "advbob@example.com", Phone: "+62822222229", Address: "Bandung"},
+		{Name: "AdvCharlie", Email: "advcharlie@example.com", Phone: "+62833333339", Address: "Jakarta"},
+	}
+	for _, u := range users {
+		db.NewInsert().Model(u).Exec(ctx)
+	}
+
+	t.Run("Column and ColumnExpr", func(t *testing.T) {
+		var result []struct {
+			Name    string
+			Address string
+		}
+		err := db.NewSelect().
+			Model((*TestUser)(nil)).
+			Column("name", "address").
+			Where("name LIKE ?", "Adv%").
+			Order("name ASC").
+			Scan(ctx, &result)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(result), 3)
+	})
+
+	t.Run("ExcludeColumn", func(t *testing.T) {
+		var users []TestUser
+		err := db.NewSelect().
+			Model(&users).
+			ExcludeColumn("phone").
+			Where("name LIKE ?", "Adv%").
+			Scan(ctx, &users)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(users), 3)
+	})
+
+	t.Run("Group and Having", func(t *testing.T) {
+		var results []struct {
+			Address string
+			Count   int `bun:"count"`
+		}
+		err := db.NewSelect().
+			Model((*TestUser)(nil)).
+			Column("address").
+			ColumnExpr("COUNT(*) as count").
+			Where("name LIKE ?", "Adv%").
+			Group("address").
+			Having("COUNT(*) >= ?", 1).
+			Scan(ctx, &results)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(results), 1)
+	})
+
+	t.Run("Exists", func(t *testing.T) {
+		exists, err := db.NewSelect().
+			Model((*TestUser)(nil)).
+			Where("name = ?", "AdvAlice").
+			Exists(ctx)
+
+		require.NoError(t, err)
+		assert.True(t, exists)
+	})
+
+	t.Run("ScanAndCount", func(t *testing.T) {
+		var users []TestUser
+		count, err := db.NewSelect().
+			Model(&users).
+			Where("name LIKE ?", "Adv%").
+			Limit(2).
+			ScanAndCount(ctx, &users)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, 3)
+		assert.LessOrEqual(t, len(users), 2)
+	})
+
+	t.Run("Distinct", func(t *testing.T) {
+		var addresses []string
+		err := db.NewSelect().
+			Model((*TestUser)(nil)).
+			Column("address").
+			Where("name LIKE ?", "Adv%").
+			Distinct().
+			Scan(ctx, &addresses)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(addresses), 2)
+	})
+}
+
+func TestBunInsertUpdateDeleteAdvanced(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("Insert with Returning", func(t *testing.T) {
+		user := &TestUser{
+			Name:  "Returning Test",
+			Email: "returning@example.com",
+			Phone: "+62855555565",
+		}
+
+		err := db.NewInsert().
+			Model(user).
+			Returning("id").
+			Scan(ctx, user)
+
+		require.NoError(t, err)
+		assert.NotZero(t, user.ID)
+	})
+
+	t.Run("Update with Set and Returning", func(t *testing.T) {
+		user := &TestUser{
+			Name:  "Set Test",
+			Email: "set@example.com",
+			Phone: "+62899999909",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		var updated TestUser
+		err := db.NewUpdate().
+			Model(&updated).
+			Set("name = ?", "Updated Name").
+			Where("id = ?", user.ID).
+			Returning("*").
+			Scan(ctx, &updated)
+
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, updated.ID)
+	})
+
+	t.Run("Update with OmitZero", func(t *testing.T) {
+		user := &TestUser{
+			Name:  "OmitZero Test",
+			Email: "omitzero@example.com",
+			Phone: "+62822222263",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		user.Email = "updated@example.com"
+		_, err := db.NewUpdate().
+			Model(user).
+			OmitZero().
+			WherePK().
+			Exec(ctx)
+
+		require.NoError(t, err)
+	})
+
+	t.Run("Delete with Returning", func(t *testing.T) {
+		user := &TestUser{
+			Name:  "Delete Returning",
+			Email: "delret@example.com",
+			Phone: "+62888888869",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		var deleted TestUser
+		err := db.NewDelete().
+			Model(&deleted).
+			Where("id = ?", user.ID).
+			Returning("*").
+			Scan(ctx, &deleted)
+
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, deleted.ID)
+	})
+}
+
+func TestBunDDLAndRawMethods(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("NewCreateTable", func(t *testing.T) {
+		type TempTable struct {
+			bun.BaseModel `bun:"table:temp_test_adv"`
+			ID            int64  `bun:"id,pk,autoincrement"`
+			Name          string `bun:"name"`
+		}
+
+		_, err := db.NewCreateTable().
+			Model((*TempTable)(nil)).
+			IfNotExists().
+			Exec(ctx)
+
+		require.NoError(t, err)
+
+		// Cleanup
+		db.NewDropTable().Model((*TempTable)(nil)).IfExists().Exec(ctx)
+	})
+
+	t.Run("NewRaw", func(t *testing.T) {
+		var count int
+		err := db.NewRaw("SELECT COUNT(*) FROM test_users").Scan(ctx, &count)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, 0)
+	})
+}
+
+func TestBunApplyMethods(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("Select with Apply", func(t *testing.T) {
+		user := &TestUser{Name: "Apply Test", Email: "apply@example.com", Phone: "+62899999981"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		applyFunc := func(q *govault.BunSelectQuery) *govault.BunSelectQuery {
+			return q.Where("name = ?", "Apply Test")
+		}
+
+		var retrieved TestUser
+		err := db.NewSelect().
+			Model(&retrieved).
+			Apply(applyFunc).
+			Scan(ctx, &retrieved)
+
+		require.NoError(t, err)
+		assert.Equal(t, "Apply Test", retrieved.Name)
+	})
+
+	t.Run("Insert with Apply", func(t *testing.T) {
+		user := &TestUser{Name: "Insert Apply", Email: "insertapply@example.com", Phone: "+62811119992"}
+
+		applyFunc := func(q *govault.BunInsertQuery) *govault.BunInsertQuery {
+			return q.Column("name", "email", "phone")
+		}
+
+		_, err := db.NewInsert().
+			Model(user).
+			Apply(applyFunc).
+			Exec(ctx)
+
+		require.NoError(t, err)
+	})
+
+	t.Run("Update with Apply", func(t *testing.T) {
+		user := &TestUser{Name: "Update Apply", Email: "updateapply@example.com", Phone: "+62899999982"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		applyFunc := func(q *govault.BunUpdateQuery) *govault.BunUpdateQuery {
+			return q.Set("name = ?", "Updated Apply")
+		}
+
+		_, err := db.NewUpdate().
+			Model((*TestUser)(nil)).
+			Apply(applyFunc).
+			Where("id = ?", user.ID).
+			Exec(ctx)
+
+		require.NoError(t, err)
+	})
+
+	t.Run("Delete with Apply", func(t *testing.T) {
+		user := &TestUser{Name: "Delete Apply", Email: "delapply@example.com", Phone: "+62899999983"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		applyFunc := func(q *bun.DeleteQuery) *bun.DeleteQuery {
+			return q.Where("id = ?", user.ID)
+		}
+
+		_, err := db.NewDelete().
+			Model((*TestUser)(nil)).
+			Apply(applyFunc).
+			Exec(ctx)
+
+		require.NoError(t, err)
+	})
+}
+
+func TestBunQueryErrorHandling(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("Select with Err", func(t *testing.T) {
+		var users []TestUser
+		err := db.NewSelect().
+			Model(&users).
+			Err(assert.AnError).
+			Scan(ctx, &users)
+
+		assert.Error(t, err)
+	})
+
+	t.Run("Insert with Err", func(t *testing.T) {
+		user := &TestUser{Name: "Error Test", Email: "err@example.com"}
+		_, err := db.NewInsert().
+			Model(user).
+			Err(assert.AnError).
+			Exec(ctx)
+
+		assert.Error(t, err)
+	})
+
+	t.Run("Update with Err", func(t *testing.T) {
+		user := &TestUser{ID: 999, Name: "Error Test"}
+		_, err := db.NewUpdate().
+			Model(user).
+			Err(assert.AnError).
+			Exec(ctx)
+
+		assert.Error(t, err)
+	})
+
+	t.Run("Delete with Err", func(t *testing.T) {
+		_, err := db.NewDelete().
+			Model((*TestUser)(nil)).
+			Err(assert.AnError).
+			Exec(ctx)
+
+		assert.Error(t, err)
+	})
+}
+
+func TestBunRawQueryEncryptionDecryption(t *testing.T) {
+	db, govaultDB, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("Raw SQL INSERT with encryption", func(t *testing.T) {
+		// Encrypt email before inserting
+		rawQuery := db.NewRaw("SELECT 1") // dummy query to get access to EncryptValue
+		encryptedEmail, err := rawQuery.EncryptValue("rawinsert@example.com")
+		require.NoError(t, err)
+
+		encryptedPhone, err := rawQuery.EncryptValue("+62811119999")
+		require.NoError(t, err)
+
+		// Insert using raw SQL with encrypted values
+		_, err = db.NewRaw(
+			"INSERT INTO test_users (name, email, phone) VALUES (?, ?, ?) RETURNING id",
+			"Raw Insert Test",
+			encryptedEmail,
+			encryptedPhone,
+		).Exec(ctx)
+
+		require.NoError(t, err)
+
+		// Verify the data is encrypted in database
+		var rawEmail string
+		err = db.NewRaw("SELECT email FROM test_users WHERE name = ?", "Raw Insert Test").
+			Scan(ctx, &rawEmail)
+		require.NoError(t, err)
+		assert.Contains(t, rawEmail, "|", "Email should be encrypted in database")
+	})
+
+	t.Run("Raw SQL SELECT with decryption", func(t *testing.T) {
+		// Insert test data with encrypted fields
+		user := &TestUser{
+			Name:  "Raw Select Test",
+			Email: "rawselect@example.com",
+			Phone: "+62822229999",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		// Select using raw SQL and verify decryption
+		var retrieved TestUser
+		err := db.NewRaw(
+			"SELECT id, name, email, phone, address FROM test_users WHERE id = ?",
+			user.ID,
+		).Scan(ctx, &retrieved)
+
+		require.NoError(t, err)
+		assert.Equal(t, "rawselect@example.com", retrieved.Email, "Email should be decrypted")
+		assert.Equal(t, "+62822229999", retrieved.Phone, "Phone should be decrypted")
+		assert.NotContains(t, retrieved.Email, "|", "Email should not contain pipe after decryption")
+	})
+
+	t.Run("Raw SQL SELECT multiple rows with decryption", func(t *testing.T) {
+		// Insert multiple test users
+		users := []*TestUser{
+			{Name: "Raw1", Email: "raw1@example.com", Phone: "+62833339991"},
+			{Name: "Raw2", Email: "raw2@example.com", Phone: "+62833339992"},
+		}
+		for _, u := range users {
+			db.NewInsert().Model(u).Exec(ctx)
+		}
+
+		// Select multiple using raw SQL
+		var retrieved []TestUser
+		err := db.NewRaw(
+			"SELECT id, name, email, phone FROM test_users WHERE name LIKE ? ORDER BY name",
+			"Raw%",
+		).Scan(ctx, &retrieved)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(retrieved), 2)
+
+		// Verify all emails are decrypted
+		for _, u := range retrieved {
+			assert.NotContains(t, u.Email, "|", "Email should be decrypted")
+			assert.Contains(t, u.Email, "@", "Email should be valid")
+		}
+	})
+
+	t.Run("Raw SQL UPDATE with encryption", func(t *testing.T) {
+		// Insert test user
+		user := &TestUser{
+			Name:  "Raw Update Test",
+			Email: "rawupdate@example.com",
+			Phone: "+62844449999",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		// Encrypt new email
+		rawQuery := db.NewRaw("SELECT 1")
+		newEncryptedEmail, err := rawQuery.EncryptValue("updated_raw@example.com")
+		require.NoError(t, err)
+
+		// Update using raw SQL
+		_, err = db.NewRaw(
+			"UPDATE test_users SET email = ? WHERE id = ?",
+			newEncryptedEmail,
+			user.ID,
+		).Exec(ctx)
+		require.NoError(t, err)
+
+		// Verify update with decryption
+		var updated TestUser
+		err = db.NewRaw(
+			"SELECT id, name, email FROM test_users WHERE id = ?",
+			user.ID,
+		).Scan(ctx, &updated)
+
+		require.NoError(t, err)
+		assert.Equal(t, "updated_raw@example.com", updated.Email)
+	})
+
+	t.Run("Raw SQL with WithKey", func(t *testing.T) {
+		// Use specific key for encryption
+		rawQuery := db.NewRaw("SELECT 1").WithKey("2")
+		encryptedEmail, err := rawQuery.EncryptValue("withkey@example.com")
+		require.NoError(t, err)
+
+		// Verify key ID is in encrypted value
+		assert.True(t, strings.HasPrefix(encryptedEmail, "2|"), "Should use key 2")
+
+		// Decrypt to verify
+		decrypted, err := govaultDB.Decrypt(encryptedEmail)
+		require.NoError(t, err)
+		assert.Equal(t, "withkey@example.com", decrypted)
+	})
+
+	t.Run("Raw SQL with empty encrypted value", func(t *testing.T) {
+		rawQuery := db.NewRaw("SELECT 1")
+		encryptedEmpty, err := rawQuery.EncryptValue("")
+		require.NoError(t, err)
+		assert.Equal(t, "", encryptedEmpty, "Empty string should remain empty")
+	})
+
+	t.Run("Raw SQL SELECT without encrypted fields", func(t *testing.T) {
+		// Insert user
+		user := &TestUser{
+			Name:    "Plain Raw",
+			Email:   "plain@example.com",
+			Phone:   "+62855559999",
+			Address: "Test Address",
+		}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		// Select only non-encrypted field
+		var name string
+		err := db.NewRaw(
+			"SELECT name FROM test_users WHERE id = ?",
+			user.ID,
+		).Scan(ctx, &name)
+
+		require.NoError(t, err)
+		assert.Equal(t, "Plain Raw", name)
+	})
+}
+
+func TestBunExoticMethods(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("Select Exotic Methods", func(t *testing.T) {
+		// Test Conn and Err
+		q := db.NewSelect().Model((*TestUser)(nil)).Conn(db.DB).Err(nil)
+		require.NotNil(t, q)
+
+		// Test With
+		withQ := db.NewSelect().Model((*TestUser)(nil)).Column("id")
+		db.NewSelect().With("cte", withQ).Table("cte").Column("*").Limit(1).Exec(ctx)
+
+		// Test WithRecursive
+		db.NewSelect().WithRecursive("cte", withQ).Table("cte").Column("*").Limit(1).Exec(ctx)
+
+		// Test DistinctOn
+		db.NewSelect().Model((*TestUser)(nil)).DistinctOn("address").Scan(ctx, &[]TestUser{})
+
+		// Test ModelTableExpr
+		db.NewSelect().Model((*TestUser)(nil)).ModelTableExpr("test_users AS my_users").Scan(ctx, &[]TestUser{})
+
+		// Test WhereGroup and WherePK
+		db.NewSelect().Model((*TestUser)(nil)).WherePK("id").WhereGroup(" AND ", func(sq *govault.BunSelectQuery) *govault.BunSelectQuery {
+			return sq.Where("name IS NOT NULL")
+		}).Limit(1).Exec(ctx)
+
+		// Test soft deletes
+		db.NewSelect().Model((*TestUser)(nil)).WhereDeleted().Limit(1).Exec(ctx)
+		db.NewSelect().Model((*TestUser)(nil)).WhereAllWithDeleted().Limit(1).Exec(ctx)
+
+		// Test Join variants
+		db.NewSelect().Model((*TestUser)(nil)).
+			Join("LEFT JOIN test_users AS u2 ON u2.id = u.id").
+			JoinOn("1=1").
+			JoinOnOr("2=2").
+			Limit(1).Exec(ctx)
+
+		// Test OrderBy and For
+		db.NewSelect().Model((*TestUser)(nil)).OrderBy("id", "ASC").For("UPDATE").Limit(1).Exec(ctx)
+
+		// Test Set Operations
+		s1 := db.NewSelect().Model((*TestUser)(nil)).Where("id = 1")
+		s2 := db.NewSelect().Model((*TestUser)(nil)).Where("id = 2")
+		s1.Union(s2).Limit(1).Exec(ctx)
+		s1.UnionAll(s2).Limit(1).Exec(ctx)
+		s1.Intersect(s2).Limit(1).Exec(ctx)
+		s1.IntersectAll(s2).Limit(1).Exec(ctx)
+		s1.Except(s2).Limit(1).Exec(ctx)
+		s1.ExceptAll(s2).Limit(1).Exec(ctx)
+
+		// Test Index Hints (MySQL specific but should work for coverage by just generating the SQL)
+		db.NewSelect().Model((*TestUser)(nil)).
+			UseIndex("idx1").UseIndexForJoin("idx2").UseIndexForOrderBy("idx3").UseIndexForGroupBy("idx4").
+			IgnoreIndex("idx5").IgnoreIndexForJoin("idx6").IgnoreIndexForOrderBy("idx7").IgnoreIndexForGroupBy("idx8").
+			ForceIndex("idx9").ForceIndexForJoin("idx10").ForceIndexForOrderBy("idx11").ForceIndexForGroupBy("idx12").
+			Comment("testing").
+			Limit(1).Exec(ctx)
+	})
+
+	t.Run("Insert Exotic Methods", func(t *testing.T) {
+		user := &TestUser{Name: "InsertExotic"}
+
+		// Test Conn
+		db.NewInsert().Model(user).Conn(db.DB).Exec(ctx)
+
+		// Table and TableExpr
+		db.NewInsert().Model(user).Table("test_users").TableExpr("test_users AS u").Exec(ctx)
+
+		// ModelTableExpr
+		db.NewInsert().Model(user).ModelTableExpr("test_users AS u").Exec(ctx)
+
+		// ColumnExpr
+		db.NewInsert().Model(user).ColumnExpr("name").Exec(ctx)
+
+		// WhereOr
+		db.NewInsert().Model(user).Where("1=1").WhereOr("2=2").Exec(ctx)
+
+		// Ignore and Replace
+		db.NewInsert().Model(user).Ignore().Exec(ctx)
+		db.NewInsert().Model(user).Replace().Exec(ctx)
+
+		// Comment
+		db.NewInsert().Model(user).Comment("test").Exec(ctx)
+
+		// CTEs
+		withQ := db.NewSelect().Model((*TestUser)(nil))
+		db.NewInsert().Model(user).With("cte", withQ).Exec(ctx)
+		db.NewInsert().Model(user).WithRecursive("cte", withQ).Exec(ctx)
+	})
+
+	t.Run("Update Exotic Methods", func(t *testing.T) {
+		user := &TestUser{ID: 1, Name: "UpdateExotic"}
+
+		// Conn and Err
+		db.NewUpdate().Model(user).Conn(db.DB).Err(nil).Exec(ctx)
+
+		// With and WithRecursive
+		withQ := db.NewSelect().Model((*TestUser)(nil))
+		db.NewUpdate().Model(user).With("cte", withQ).WithRecursive("cte", withQ).Exec(ctx)
+
+		// Table and TableExpr
+		db.NewUpdate().Model(user).Table("test_users").TableExpr("test_users AS u").Exec(ctx)
+
+		// ModelTableExpr
+		db.NewUpdate().Model(user).ModelTableExpr("test_users AS u").Exec(ctx)
+
+		// Column and ExcludeColumn
+		db.NewUpdate().Model(user).Column("name").ExcludeColumn("email").Exec(ctx)
+
+		// SetColumn and Value
+		db.NewUpdate().Model(user).SetColumn("name", "UPPER(?)", "val").Value("address", "'addr'").Exec(ctx)
+
+		// Join variants
+		db.NewUpdate().Model(user).
+			Join("LEFT JOIN test_users AS u2 ON u2.id = test_user.id"). // table name might vary
+			JoinOn("1=1").
+			JoinOnOr("2=2").
+			Exec(ctx)
+
+		// Where variants
+		db.NewUpdate().Model(user).Where("1=1").WhereOr("2=2").WhereGroup(" AND ", func(uq *govault.BunUpdateQuery) *govault.BunUpdateQuery {
+			return uq.Where("3=3")
+		}).Exec(ctx)
+
+		// soft deletes
+		db.NewUpdate().Model(user).WhereDeleted().WhereAllWithDeleted().Exec(ctx)
+
+		// Order, OrderExpr, Limit
+		db.NewUpdate().Model(user).Order("id").OrderExpr("id DESC").Limit(1).Exec(ctx)
+
+		// Index Hints
+		db.NewUpdate().Model(user).UseIndex("idx").IgnoreIndex("idx").ForceIndex("idx").Comment("test").Exec(ctx)
+	})
+
+	t.Run("Delete Exotic Methods", func(t *testing.T) {
+		user := &TestUser{ID: 1}
+
+		// Conn and Err
+		db.NewDelete().Model(user).Conn(db.DB).Err(nil).Exec(ctx)
+
+		// With and WithRecursive
+		withQ := db.NewSelect().Model((*TestUser)(nil))
+		db.NewDelete().Model(user).With("cte", withQ).WithRecursive("cte", withQ).Exec(ctx)
+
+		// Table and TableExpr
+		db.NewDelete().Model(user).Table("test_users").TableExpr("test_users AS u").Exec(ctx)
+
+		// ModelTableExpr
+		db.NewDelete().Model(user).ModelTableExpr("test_users AS u").Exec(ctx)
+
+		// WherePK, WhereOr, WhereGroup
+		db.NewDelete().Model(user).WherePK().WhereOr("1=1").WhereGroup(" AND ", func(dq *bun.DeleteQuery) *bun.DeleteQuery {
+			return dq.Where("2=2")
+		}).Exec(ctx)
+
+		// soft deletes
+		db.NewDelete().Model(user).WhereDeleted().WhereAllWithDeleted().ForceDelete().Exec(ctx)
+
+		// Order, OrderExpr, Limit, Returning, Comment
+		db.NewDelete().Model(user).Order("id").OrderExpr("id").Limit(1).Returning("id").Comment("test").Exec(ctx)
+	})
+}
+
+func TestDecryptValueExotic(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	t.Run("Decrypt slice of pointers", func(t *testing.T) {
+		user := &TestUser{Name: "SlicePointer", Email: "ptr@example.com"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		var users []*TestUser
+		err := db.NewSelect().Model(&users).Where("name = ?", "SlicePointer").Scan(ctx, &users)
+		require.NoError(t, err)
+		require.NotEmpty(t, users)
+		assert.Equal(t, "ptr@example.com", users[0].Email)
+	})
+
+	t.Run("Decrypt slice of structs", func(t *testing.T) {
+		user := &TestUser{Name: "SliceStruct", Email: "struct@example.com"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		var users []TestUser
+		err := db.NewSelect().Model(&users).Where("name = ?", "SliceStruct").Scan(ctx, &users)
+		require.NoError(t, err)
+		require.NotEmpty(t, users)
+		assert.Equal(t, "struct@example.com", users[0].Email)
+	})
+}
+
+type TestProfile struct {
+	bun.BaseModel `bun:"table:test_profiles"`
+	ID            int64     `bun:"id,pk,autoincrement"`
+	UserID        int64     `bun:"user_id"`
+	Bio           string    `bun:"bio" encrypted:"true"`
+	User          *TestUser `bun:"rel:belongs-to,join:user_id=id"`
+}
+
+func TestBunFinalCoverage(t *testing.T) {
+	db, _, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	t.Run("BunDB DDL and Index methods", func(t *testing.T) {
+		// NewCreateIndex
+		_, err := db.NewCreateIndex().Model((*TestUser)(nil)).Index("idx_name").Column("name").Exec(ctx)
+		require.NoError(t, err)
+
+		// NewDropIndex
+		_, err = db.NewDropIndex().Index("idx_name").Exec(ctx)
+		require.NoError(t, err)
+
+		// NewTruncateTable
+		_, err = db.NewTruncateTable().Model((*TestUser)(nil)).Exec(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("BunDB NewValues", func(t *testing.T) {
+		user := &TestUser{Name: "ValuesTest"}
+		q := db.NewValues(user)
+		assert.NotNil(t, q)
+	})
+
+	t.Run("BunInsertQuery Exotic", func(t *testing.T) {
+		user := &TestUser{Name: "InsertExotic2", Email: "exotic2@example.com"}
+
+		// ExcludeColumn
+		_, err := db.NewInsert().Model(user).ExcludeColumn("phone").Exec(ctx)
+		require.NoError(t, err)
+
+		// Value - note: Value is used to set specific columns to expressions or values
+		_, err = db.NewInsert().Model(&TestUser{Name: "ValueInsert"}).Value("email", "?", "val|key|nonce").Exec(ctx)
+		require.NoError(t, err)
+
+		// On Conflict
+		_, err = db.NewInsert().Model(user).On("CONFLICT (id) DO UPDATE SET name = EXCLUDED.name").Exec(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("BunSelectQuery Exotic", func(t *testing.T) {
+		// TableExpr
+		var count int
+		err := db.NewSelect().TableExpr("(SELECT 1 as val) as tmp").Column("val").Scan(ctx, &count)
+		require.NoError(t, err)
+
+		// GroupExpr
+		var results []struct {
+			Address string
+			Total   int
+		}
+		db.NewSelect().Model((*TestUser)(nil)).Column("address").ColumnExpr("count(*) as total").GroupExpr("address").Scan(ctx, &results)
+
+		// Relation setup
+		_, err = db.NewCreateTable().Model((*TestProfile)(nil)).Exec(ctx)
+		require.NoError(t, err)
+		defer db.NewDropTable().Model((*TestProfile)(nil)).Exec(ctx)
+
+		user := &TestUser{Name: "RelUser", Email: "rel@example.com"}
+		db.NewInsert().Model(user).Exec(ctx)
+
+		profile := &TestProfile{UserID: user.ID, Bio: "My Bio"}
+		db.NewInsert().Model(profile).Exec(ctx)
+
+		var retrievedProfile TestProfile
+		err = db.NewSelect().Model(&retrievedProfile).Relation("User").Where("test_profile.id = ?", profile.ID).Scan(ctx, &retrievedProfile)
+		require.NoError(t, err)
+		assert.Equal(t, "My Bio", retrievedProfile.Bio)
+		assert.NotNil(t, retrievedProfile.User)
+		assert.Equal(t, "rel@example.com", retrievedProfile.User.Email)
+	})
 }
