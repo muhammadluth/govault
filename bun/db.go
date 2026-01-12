@@ -183,12 +183,12 @@ func (db *BunDB) NewValues(model any) *bun.ValuesQuery {
 
 // Exec executes the query
 func (db *BunDB) Exec(query string, args ...any) (sql.Result, error) {
-	return db.DB.ExecContext(context.Background(), query, args...)
+	return db.NewRaw(query, args...).Exec(context.Background())
 }
 
 // ExecContext executes the query
 func (db *BunDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return db.DB.ExecContext(ctx, query, args...)
+	return db.NewRaw(query, args...).Exec(ctx)
 }
 
 // Query executes the query
@@ -403,12 +403,12 @@ func (tx *BunTx) NewValues(model any) *bun.ValuesQuery {
 
 // Exec executes the query
 func (tx *BunTx) Exec(query string, args ...any) (sql.Result, error) {
-	return tx.Tx.ExecContext(context.Background(), query, args...)
+	return tx.NewRaw(query, args...).Exec(context.Background())
 }
 
 // ExecContext executes the query
 func (tx *BunTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return tx.Tx.ExecContext(ctx, query, args...)
+	return tx.NewRaw(query, args...).Exec(ctx)
 }
 
 // Query executes the query
