@@ -3,6 +3,7 @@ package bun
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/muhammadluth/govault/internal"
 	"github.com/uptrace/bun"
@@ -241,7 +242,8 @@ func (q *BunSelectQuery) ExceptAll(other *BunSelectQuery) *BunSelectQuery {
 // Relation adds a relation to the query
 func (q *BunSelectQuery) Relation(name string, apply ...func(*BunSelectQuery) *BunSelectQuery) *BunSelectQuery {
 	if len(apply) > 1 {
-		panic("only one apply function is supported")
+		q.Err(fmt.Errorf("only one apply function is supported"))
+		return q
 	}
 
 	if len(apply) == 0 {

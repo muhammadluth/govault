@@ -28,7 +28,7 @@ func (q *BunInsertQuery) Conn(db bun.IConn) *BunInsertQuery {
 // Model sets the model and encrypts fields
 func (q *BunInsertQuery) Model(model any) *BunInsertQuery {
 	if err := q.encryptModel(model); err != nil {
-		panic(err)
+		return q.Err(err)
 	}
 	q.InsertQuery.Model(model)
 	return q

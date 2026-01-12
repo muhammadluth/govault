@@ -27,7 +27,7 @@ func (q *BunUpdateQuery) Conn(db bun.IConn) *BunUpdateQuery {
 // Model sets the model and encrypts fields
 func (q *BunUpdateQuery) Model(model any) *BunUpdateQuery {
 	if err := q.encryptModel(model); err != nil {
-		panic(err)
+		return q.Err(err)
 	}
 	q.UpdateQuery.Model(model)
 	return q
